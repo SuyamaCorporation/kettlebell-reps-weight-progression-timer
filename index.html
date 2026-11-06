@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ケトルベル重量漸進タイマー</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  .timer-ring { transition: stroke-dashoffset 0.5s linear; }
+</style>
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+<div class="max-w-2xl mx-auto px-4 py-6">
+  <h1 class="text-2xl font-bold text-center text-red-400 mb-1">🏋️ ケトルベルタイマー</h1>
+  <p class="text-center text-gray-400 text-sm mb-4">トレーニング記録と漸進的過負荷サポート</p>
+
+  <!-- Exercise Setup -->
+  <div class="bg-gray-800 rounded-xl p-4 mb-4">
+    <h2 class="text-sm font-semibold text-gray-300 mb-3">📋 ワークアウト設定</h2>
+    <div id="exercise-rows" class="space-y-3"></div>
+    <button onclick="addExercise()" class="mt-3 w-full py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm" aria-label="種目追加">＋ 種目を追加</button>
+  </div>
+
+  <!-- Active Timer -->
+  <div id="timer-section" class="hidden bg-gray-800 rounded-xl p-4 mb-4 text-center">
+    <div id="timer-label" class="text-sm text-gray-400 mb-2">セット中</div>
+    <svg viewBox="0 0 100 100" class="w-32 h-32 mx-auto mb-3" aria-hidden="true">
+      <circle cx="50" cy="50" r="45" stroke="#374151" stroke-width="8" fill="none"/>
+      <circle id="timer-ring" cx="50" cy="50" r="45" stroke="#ef4444" stroke-width="8" fill="none"
+        stroke-dasharray="282.7" stroke-dashoffset="0" transform="rotate(-90 50 50)" class="timer-ring"/>
+    </svg>
+    <div id="timer-display" class="text-5xl font-bold text-white mb-3">0:00</div>
+    <div id="timer-info" class="text-sm text-gray-400 mb-3"></div>
+    <div class="flex gap-2 justify-center">
+      <button onclick="pauseTimer()" id="pause-btn" class="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 rounded-lg text-sm" aria-label="一時停止">⏸ 一時停止</button>
+      <button onclick="skipTimer()" class="px-4 py-2 bg-gray-600 hover:bg-gray-500 rounded-lg text-sm" aria-label="スキップ">⏭ スキップ</button>
+    </div>
+  </div>
+
+  <!-- Start Button -->
+  <button onclick="startWorkout()" id="start-btn" class="w-full py-3 bg-red-600 hover:bg-red-500 rounded-xl text-lg font-bold mb-4" aria-label="ワークアウト開始">🚀 ワークアウト開始</button>
+
+  <!-- Progressive Overload -->
+  <div id="progression-section" class="hidden bg-gray-800 rounded-xl p-4 mb-4">
+    <h2 class="text-sm font-semibold text-gray-300 mb-2">📈 次回重量提案</h2>
+    <div id="progression-items" class="space-y-2"></div>
+  </div>
+
+  <!-- History -->
+  <div class="bg-gray-800 rounded-xl p-4">
+    <h2 class="text-sm font-semibold text-gray-300 mb-3">🗓 履歴（直近5回）</h2>
+    <div id="history-list" class="space-y-2 text-sm"></div>
+  </div>
+</div>
+
+<script>
+const EXERCISES = ['スイング','クリーン','スナッチ','プレス','ゴブレットスクワット','トルコ式ゲットアップ'];
+let exercises = JSON.parse(localStorage.getItem('kb-exercises') || JSON.stringify([
+  {name:'スイング', sets:3, reps:15, weight:16},
+  {name:'ゴブレットスクワット', sets:3, reps:10, weight:16},
+]));
+let history = JSON.parse(localStorage.getItem('kb-history') || '[]');
+
+let timerInterval = null;
+let timerRemaining = 0;
+let timerTotal = 0;
+let timerPaused = false;
+let workoutQueue = [];
+let workoutQueueIndex = 0;
+let currentSet = {exerciseIdx: 0, setNum: 0, phase: 'work'};
+const REST_TIME = 90;
+
+function saveExercises() { localStorage.setItem('kb-exercises', JSON.stringify(exercises)); }
+
+function renderExercises() {
+  const container = document.getElementById('exercise-rows');
+  while (container.firstChild) container.removeChild(container.firstChild);
+  exercises.forEach((ex, i) => {
+    const div = document.createElement('div');
+    div.className = 'bg-gray-700 rounded-lg p-3';
+
+    const row1 = document.createElement('div');
+    row1.className = 'flex items-center gap-2 mb-2';
+
+    const sel = document.createElement('select');
+    sel.className = 'flex-1 bg-gray-600 rounded px-2 py-1.5 text-sm focus:outline-none';
+    sel.setAttribute('aria-label', '種目選択');
+    EXERCISES.forEach(e => {
+      const opt = document.createElement('option');
+      opt.value = e; opt.textContent = e;
+      if (e === ex.name) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    sel.onchange = () => { exercises[i].name = sel.value; saveExercises(); };
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'text-red-400 hover:text-red-300 text-xs';
+    removeBtn.textContent = '✕';
+    removeBtn.setAttribute('aria-label', '種目削除');
+    removeBtn.onclick = () => { exercises.splice(i, 1); saveExercises(); renderExercises(); };
+
+    row1.appendChild(sel);
+    row1.appendChild(removeBtn);
+
+    const row2 = document.createElement('div');
+    row2.className = 'grid grid-cols-3 gap-2';
+    const fields = [
+      {label:'セット数', key:'sets', min:1, max:10},
+      {label:'レップ数', key:'reps', min:1, max:50},
+      {label:'重量(kg)', key:'weight', min:4, max:100},
+    ];
+    fields.forEach(f => {
+      const wrap = document.createElement('div');
+      const lbl = document.createElement('label');
+      lbl.className = 'text-xs text-gray-400 block mb-1';
+      lbl.textContent = f.label;
+      const inp = document.createElement('input');
+      inp.type = 'number';
+      inp.min = f.min; inp.max = f.max;
+      inp.value = ex[f.key];
+      inp.className = 'w-full bg-gray-600 rounded px-2 py-1 text-sm focus:outline-none';
+      inp.setAttribute('aria-label', f.label);
+      inp.oninput = () => { exercises[i][f.key] = parseInt(inp.value) || 0; saveExercises(); };
+      wrap.appendChild(lbl);
+      wrap.appendChild(inp);
+      row2.appendChild(wrap);
+    });
+
+    div.appendChild(row1);
+    div.appendChild(row2);
+    container.appendChild(div);
+  });
+}
+
+function addExercise() {
+  exercises.push({name:'スイング', sets:3, reps:15, weight:16});
+  saveExercises();
+  renderExercises();
+}
+
+// Build queue: for each exercise, alternate work->rest->work->rest...
+function buildQueue() {
+  const queue = [];
+  exercises.forEach((ex, ei) => {
+    for (let s = 1; s <= ex.sets; s++) {
+      queue.push({phase:'work', exerciseIdx:ei, setNum:s, label: ex.name + ' セット' + s, duration: null});
+      if (s < ex.sets) queue.push({phase:'rest', exerciseIdx:ei, setNum:s, label:'レスト', duration: REST_TIME});
+    }
+    if (ei < exercises.length - 1) queue.push({phase:'rest', exerciseIdx:ei, setNum:ex.sets, label:'種目間レスト', duration: 120});
+  });
+  return queue;
+}
+
+function startWorkout() {
+  if (exercises.length === 0) return;
+  workoutQueue = buildQueue();
+  workoutQueueIndex = 0;
+  document.getElementById('timer-section').classList.remove('hidden');
+  document.getElementById('start-btn').classList.add('hidden');
+  runNext();
+}
+
+function runNext() {
+  if (workoutQueueIndex >= workoutQueue.length) {
+    finishWorkout();
+    return;
+  }
+  const item = workoutQueue[workoutQueueIndex];
+  const isRest = item.phase === 'rest';
+  const duration = isRest ? item.duration : 0;
+
+  document.getElementById('timer-label').textContent = item.label + (isRest ? ' (' + duration + '秒)' : '');
+  const ex = exercises[item.exerciseIdx];
+  document.getElementById('timer-info').textContent = isRest ? '次: ' + (workoutQueue[workoutQueueIndex+1]?.label || 'ワークアウト完了') : ex.weight + 'kg × ' + ex.reps + 'レップ';
+
+  if (isRest) {
+    startCountdown(duration);
+  } else {
+    // Work phase: show set instruction, wait for user to tap next
+    document.getElementById('timer-display').textContent = '実行中';
+    document.getElementById('timer-ring').style.strokeDashoffset = '0';
+    clearInterval(timerInterval);
+  }
+}
+
+function startCountdown(seconds) {
+  timerTotal = seconds;
+  timerRemaining = seconds;
+  timerPaused = false;
+  updateTimerDisplay();
+  clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    if (!timerPaused) {
+      timerRemaining--;
+      updateTimerDisplay();
+      if (timerRemaining <= 0) {
+        clearInterval(timerInterval);
+        workoutQueueIndex++;
+        runNext();
+      }
+    }
+  }, 1000);
+}
+
+function updateTimerDisplay() {
+  const m = Math.floor(timerRemaining / 60);
+  const s = timerRemaining % 60;
+  document.getElementById('timer-display').textContent = m + ':' + String(s).padStart(2,'0');
+  const offset = 282.7 * (1 - timerRemaining / timerTotal);
+  document.getElementById('timer-ring').style.strokeDashoffset = offset;
+}
+
+function pauseTimer() {
+  timerPaused = !timerPaused;
+  document.getElementById('pause-btn').textContent = timerPaused ? '▶ 再開' : '⏸ 一時停止';
+}
+
+function skipTimer() {
+  clearInterval(timerInterval);
+  workoutQueueIndex++;
+  runNext();
+}
+
+function finishWorkout() {
+  clearInterval(timerInterval);
+  document.getElementById('timer-section').classList.add('hidden');
+  document.getElementById('start-btn').classList.remove('hidden');
+  document.getElementById('start-btn').textContent = '🔄 再スタート';
+
+  // Save to history
+  const session = {
+    date: new Date().toLocaleDateString('ja-JP'),
+    exercises: exercises.map(e => ({name:e.name, sets:e.sets, reps:e.reps, weight:e.weight, volume:e.sets*e.reps*e.weight}))
+  };
+  history.unshift(session);
+  if (history.length > 30) history = history.slice(0, 30);
+  localStorage.setItem('kb-history', JSON.stringify(history));
+  renderHistory();
+  checkProgression();
+}
+
+function checkProgression() {
+  const section = document.getElementById('progression-section');
+  const items = document.getElementById('progression-items');
+  while (items.firstChild) items.removeChild(items.firstChild);
+
+  const suggestions = [];
+  exercises.forEach(ex => {
+    const sessions = history.filter(h => h.exercises.some(e => e.name === ex.name));
+    if (sessions.length >= 3) {
+      const last3 = sessions.slice(0, 3);
+      const allComplete = last3.every(s => {
+        const e = s.exercises.find(e => e.name === ex.name);
+        return e && e.reps >= ex.reps && e.sets >= ex.sets;
+      });
+      if (allComplete) {
+        suggestions.push({name: ex.name, current: ex.weight, next: ex.weight + 2});
+      }
+    }
+  });
+
+  if (suggestions.length > 0) {
+    section.classList.remove('hidden');
+    suggestions.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'flex items-center justify-between bg-gray-700 rounded p-2 text-sm';
+      const left = document.createElement('span');
+      left.textContent = s.name + ': ' + s.current + 'kg → ';
+      const right = document.createElement('span');
+      right.className = 'text-green-400 font-bold';
+      right.textContent = s.next + 'kg に増量推奨！';
+      div.appendChild(left);
+      div.appendChild(right);
+      items.appendChild(div);
+    });
+  } else {
+    section.classList.add('hidden');
+  }
+}
+
+function renderHistory() {
+  const container = document.getElementById('history-list');
+  while (container.firstChild) container.removeChild(container.firstChild);
+  if (history.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'text-gray-500 text-center';
+    p.textContent = '履歴がありません';
+    container.appendChild(p);
+    return;
+  }
+  history.slice(0, 5).forEach(h => {
+    const div = document.createElement('div');
+    div.className = 'bg-gray-700 rounded-lg p-2';
+    const date = document.createElement('div');
+    date.className = 'text-xs text-gray-400 mb-1';
+    date.textContent = h.date;
+    div.appendChild(date);
+    let totalVol = 0;
+    h.exercises.forEach(e => {
+      const row = document.createElement('div');
+      row.className = 'flex justify-between text-xs';
+      const left = document.createElement('span');
+      left.textContent = e.name + ' ' + e.sets + 'セット×' + e.reps + 'rep/' + e.weight + 'kg';
+      const right = document.createElement('span');
+      right.className = 'text-orange-400';
+      right.textContent = e.volume + 'kg';
+      totalVol += e.volume;
+      row.appendChild(left);
+      row.appendChild(right);
+      div.appendChild(row);
+    });
+    const total = document.createElement('div');
+    total.className = 'text-xs text-right text-yellow-400 font-bold mt-1';
+    total.textContent = '総ボリューム: ' + totalVol + 'kg';
+    div.appendChild(total);
+    container.appendChild(div);
+  });
+}
+
+renderExercises();
+renderHistory();
+checkProgression();
+</script>
+</body>
+</html>
